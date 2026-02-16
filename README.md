@@ -6,6 +6,7 @@ A streamlined git worktree workflow wrapper that makes working with feature bran
 
 - **Simple commands** for common worktree operations
 - **Smart cleanup** - no accidental data loss
+- **Shared paths** - symlink directories (databases, caches, logs) between worktrees
 - **Auto-push and PR creation** integration
 - **Interactive menus** when multiple options exist
 - **Bash completion** for all commands
@@ -55,8 +56,14 @@ git-wt init
 
 # This restructures your repo:
 # my-repo/
-# ├── main/    # your original repo
-# └── trees/   # worktrees go here
+# ├── main/                     # your original repo
+# ├── trees/                    # worktrees go here
+# └── .git-worktree-shared      # config for shared paths
+
+# Configure shared paths (optional but recommended)
+# Edit .git-worktree-shared to list paths to symlink between worktrees
+# Examples: .lq, .cache, logs, *.duckdb
+nano .git-worktree-shared
 
 # Start a new feature
 git-wt start feature/new-thing
@@ -93,6 +100,31 @@ This structure:
 - Allows multiple features in parallel
 - Makes it easy to switch contexts
 - Prevents merge conflicts from switching branches
+
+## Shared Paths
+
+git-wt supports **shared paths** - directories that are symlinked from main to all worktrees. This is perfect for:
+
+- **Databases** - `.lq/`, `*.duckdb`, `*.db`
+- **Caches** - `.cache/`, `node_modules/.cache/`
+- **Logs** - `logs/`, `.logs/`
+- **Build outputs** - `dist/`, `build/`
+
+### Configuration
+
+Edit `.git-worktree-shared` in your repository root:
+
+```bash
+# .git-worktree-shared
+.lq
+.cache
+logs
+dist
+```
+
+When you create a worktree with `git-wt start`, these paths are automatically symlinked from main.
+
+**See [SHARED-PATHS.md](SHARED-PATHS.md) for detailed documentation.**
 
 ## Commands
 

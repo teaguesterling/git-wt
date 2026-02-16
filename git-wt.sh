@@ -6,6 +6,7 @@
 : ${GIT_WT_MAIN_DIR:="main"}
 : ${GIT_WT_TREES_DIR:="trees"}
 : ${GIT_WT_MARKER:=".git-worktree"}
+: ${GIT_WT_SHARED_CONFIG:=".git-worktree-shared"}
 
 # Color definitions
 : ${GIT_WT_COLOR_BRANCH:="\033[32m"}      # Green for branches
@@ -76,6 +77,67 @@ _git_wt_check_repo() {
     return 0
 }
 
+# Helper: Get shared paths from config file
+_git_wt_get_shared_paths() {
+    local root=$(_git_wt_find_root)
+    if [ -z "$root" ]; then
+        return 1
+    fi
+
+    local config_file="$root/$GIT_WT_SHARED_CONFIG"
+    if [ -f "$config_file" ]; then
+        # Read non-empty, non-comment lines
+        grep -v '^\s*#' "$config_file" | grep -v '^\s*$'
+    fi
+}
+
+# Helper: Create symlinks for shared paths
+_git_wt_create_shared_symlinks() {
+    local worktree_path="$1"
+    local main_path=$(_git_wt_main_path)
+
+    if [ -z "$main_path" ] || [ -z "$worktree_path" ]; then
+        return 1
+    fi
+
+    local shared_paths=$(_git_wt_get_shared_paths)
+    if [ -z "$shared_paths" ]; then
+        return 0  # No shared paths configured, not an error
+    fi
+
+    echo -e "${GIT_WT_COLOR_DIM}Creating symlinks for shared paths...${GIT_WT_COLOR_RESET}"
+
+    while IFS= read -r path; do
+        # Skip empty lines
+        [ -z "$path" ] && continue
+
+        local source="$main_path/$path"
+        local target="$worktree_path/$path"
+
+        # Check if source exists in main
+        if [ ! -e "$source" ]; then
+            echo -e "${GIT_WT_COLOR_WARNING}Warning: Shared path not found in main: $path${GIT_WT_COLOR_RESET}" >&2
+            continue
+        fi
+
+        # Remove target if it exists (git worktree creates it)
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            rm -rf "$target"
+        fi
+
+        # Create parent directory if needed
+        local target_parent=$(dirname "$target")
+        mkdir -p "$target_parent"
+
+        # Create symlink
+        if ln -s "$source" "$target"; then
+            echo -e "  ${GIT_WT_COLOR_DIM}Linked: $path${GIT_WT_COLOR_RESET}"
+        else
+            echo -e "${GIT_WT_COLOR_WARNING}Warning: Failed to link: $path${GIT_WT_COLOR_RESET}" >&2
+        fi
+    done <<< "$shared_paths"
+}
+
 # Main git-wt function
 git-wt() {
     local cmd=$1
@@ -131,25 +193,90 @@ git-wt() {
 _git_wt_init() {
     local project_path="${1:-.}"
 
-    # Use the existing git-worktree-init script if available
-    if command -v git-worktree-init &>/dev/null; then
-        git-worktree-init "$project_path"
-        local ret=$?
-
-        # Add marker file if successful
-        if [ $ret -eq 0 ]; then
-            local parent_dir=$(dirname "$(cd "$project_path" && pwd)")
-            local project_name=$(basename "$(cd "$project_path" && pwd)")
-            touch "$parent_dir/$project_name/$GIT_WT_MARKER"
-            echo "Created worktree marker file"
-        fi
-
-        return $ret
-    else
-        echo -e "${GIT_WT_COLOR_ERROR}Error: git-worktree-init not found${GIT_WT_COLOR_RESET}" >&2
-        echo "Please ensure git-worktree-init is in your PATH" >&2
+    # Resolve to absolute path
+    if ! project_path="$(cd "$project_path" 2>/dev/null && pwd)"; then
+        echo -e "${GIT_WT_COLOR_ERROR}Error: Path does not exist: $1${GIT_WT_COLOR_RESET}" >&2
         return 1
     fi
+
+    local project_name="$(basename "$project_path")"
+    local parent_dir="$(dirname "$project_path")"
+
+    # Validation
+    if [ ! -d "$project_path/.git" ]; then
+        echo -e "${GIT_WT_COLOR_ERROR}Error: Not a git repository: $project_path${GIT_WT_COLOR_RESET}" >&2
+        return 1
+    fi
+
+    if [ -d "$project_path/$GIT_WT_MAIN_DIR" ]; then
+        echo -e "${GIT_WT_COLOR_ERROR}Error: Already restructured ($GIT_WT_MAIN_DIR/ exists): $project_path${GIT_WT_COLOR_RESET}" >&2
+        return 1
+    fi
+
+    if [ -d "$project_path/$GIT_WT_TREES_DIR" ]; then
+        echo -e "${GIT_WT_COLOR_ERROR}Error: Already restructured ($GIT_WT_TREES_DIR/ exists): $project_path${GIT_WT_COLOR_RESET}" >&2
+        return 1
+    fi
+
+    # Check for uncommitted changes
+    if ! git -C "$project_path" diff-index --quiet HEAD -- 2>/dev/null; then
+        echo -e "${GIT_WT_COLOR_WARNING}Warning: uncommitted changes detected${GIT_WT_COLOR_RESET}"
+        echo -n "Continue anyway? [y/N] "
+        read -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+    fi
+
+    echo "Restructuring: $project_path"
+    echo "  $project_name/ → $project_name/$GIT_WT_MAIN_DIR/ + $project_name/$GIT_WT_TREES_DIR/"
+    echo
+
+    # Perform restructure
+    local temp_name="${project_name}.worktree-migrate.tmp"
+
+    cd "$parent_dir"
+    mv "$project_name" "$temp_name"
+    mkdir "$project_name"
+    mv "$temp_name" "$project_name/$GIT_WT_MAIN_DIR"
+    mkdir "$project_name/$GIT_WT_TREES_DIR"
+
+    # Create marker file
+    touch "$project_name/$GIT_WT_MARKER"
+
+    # Create example shared paths config
+    cat > "$project_name/$GIT_WT_SHARED_CONFIG" << 'EOF'
+# git-wt shared paths configuration
+#
+# List paths (relative to repo root) that should be symlinked from main to all worktrees.
+# This is useful for:
+#   - Database files (.lq/, *.db, *.duckdb)
+#   - Cache directories (.cache/, node_modules/.cache)
+#   - Log directories (logs/, .logs/)
+#   - Build artifacts (dist/, build/)
+#
+# One path per line. Lines starting with # are comments.
+# Paths should be relative to the repository root.
+#
+# Example:
+# .lq
+# .cache
+# logs
+# *.duckdb
+
+EOF
+
+    echo "Done! Structure is now:"
+    echo "  $project_name/"
+    echo "  ├── $GIT_WT_MAIN_DIR/    # your repo"
+    echo "  ├── $GIT_WT_TREES_DIR/   # worktrees go here"
+    echo "  └── $GIT_WT_SHARED_CONFIG   # shared paths config"
+    echo
+    echo "Edit $GIT_WT_SHARED_CONFIG to configure paths shared between worktrees"
+    echo
+    echo "Create worktrees with:"
+    echo "  git-wt start <branch-name>"
 }
 
 # Start a new feature branch worktree
@@ -222,6 +349,9 @@ _git_wt_start() {
     fi
 
     echo -e "${GIT_WT_COLOR_PATH}Worktree created at: $worktree_path${GIT_WT_COLOR_RESET}"
+
+    # Create symlinks for shared paths
+    _git_wt_create_shared_symlinks "$worktree_path"
 
     if [ "$auto_cd" = true ]; then
         cd "$worktree_path"
