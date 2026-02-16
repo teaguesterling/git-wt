@@ -1,0 +1,23 @@
+#!/bin/bash
+# Backward compatibility wrapper for git-wt init
+#
+# This script is deprecated. Use 'git-wt init' instead.
+# Kept for backward compatibility with existing workflows.
+#
+# Usage: git-worktree-init <project-path>
+#        git-worktree-init .                    # current directory
+#
+# Example: git-worktree-init ~/Projects/my-repo
+
+set -euo pipefail
+
+# Check if git-wt is available
+if command -v git-wt &>/dev/null; then
+    # Call git-wt init with the same arguments
+    git-wt init "$@"
+else
+    echo "Error: git-wt not found" >&2
+    echo "Please source git-wt.sh in your .bashrc:" >&2
+    echo "  source ~/.dotfiles/git-wt/git-wt.sh" >&2
+    exit 1
+fi
