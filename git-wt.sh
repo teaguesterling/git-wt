@@ -150,6 +150,9 @@ git-wt() {
         start|s)
             _git_wt_start "$@"
             ;;
+        create|c)
+            _git_wt_create "$@"
+            ;;
         resume|r)
             _git_wt_resume "$@"
             ;;
@@ -159,7 +162,10 @@ git-wt() {
         finish|f)
             _git_wt_finish "$@"
             ;;
-        cancel|c)
+        delete|d)
+            _git_wt_delete "$@"
+            ;;
+        cancel|x)
             _git_wt_cancel "$@"
             ;;
         list|l)
@@ -283,7 +289,7 @@ EOF
 _git_wt_start() {
     local branch_name=""
     local source_branch=""
-    local auto_cd=false
+    local auto_cd=true
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -292,8 +298,8 @@ _git_wt_start() {
                 source_branch="$2"
                 shift 2
                 ;;
-            -c|--cd)
-                auto_cd=true
+            -C|--no-cd)
+                auto_cd=false
                 shift
                 ;;
             -*)
@@ -315,7 +321,7 @@ _git_wt_start() {
     # Validate branch name
     if [ -z "$branch_name" ]; then
         echo -e "${GIT_WT_COLOR_ERROR}Error: Branch name required${GIT_WT_COLOR_RESET}" >&2
-        echo "Usage: git-wt start [-s|--source SOURCE_BRANCH] [-c|--cd] BRANCH_NAME" >&2
+        echo "Usage: git-wt start [-s|--source SOURCE_BRANCH] [-C|--no-cd] BRANCH_NAME" >&2
         return 1
     fi
 
@@ -362,13 +368,21 @@ _git_wt_start() {
     fi
 }
 
-# Resume (cd to) an existing worktree
-_git_wt_resume() {
-    _git_wt_check_repo || return 1
+# Create a new feature branch worktree (without cd)
+_git_wt_create() {
+    _git_wt_start --no-cd "$@"
+}
+
+# Helper: Select a worktree interactively
+# Usage: _git_wt_select_worktree <branch_nameref> <path_nameref> [filter]
+# Sets the nameref variables to the selected branch name and worktree path
+# Returns 1 on failure/no selection
+_git_wt_select_worktree() {
+    local -n _sel_branch=$1
+    local -n _sel_path=$2
+    local filter="$3"
 
     local main_path=$(_git_wt_main_path)
-    local trees_path=$(_git_wt_trees_path)
-    local filter="$1"
 
     # Get list of worktrees (excluding main)
     local worktrees=()
@@ -401,8 +415,8 @@ _git_wt_resume() {
         fi
         return 1
     elif [ ${#worktrees[@]} -eq 1 ]; then
-        cd "${worktree_paths[0]}"
-        echo -e "Switched to worktree: ${GIT_WT_COLOR_BRANCH}${worktrees[0]}${GIT_WT_COLOR_RESET}"
+        _sel_branch="${worktrees[0]}"
+        _sel_path="${worktree_paths[0]}"
     else
         # Multiple worktrees - show menu
         echo "Multiple worktrees found:"
@@ -415,13 +429,69 @@ _git_wt_resume() {
         read -r choice
 
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#worktrees[@]} ]; then
-            cd "${worktree_paths[$((choice-1))]}"
-            echo -e "Switched to worktree: ${GIT_WT_COLOR_BRANCH}${worktrees[$((choice-1))]}${GIT_WT_COLOR_RESET}"
+            _sel_branch="${worktrees[$((choice-1))]}"
+            _sel_path="${worktree_paths[$((choice-1))]}"
         else
             echo -e "${GIT_WT_COLOR_ERROR}Invalid choice${GIT_WT_COLOR_RESET}" >&2
             return 1
         fi
     fi
+}
+
+# Resume (cd to) an existing worktree
+_git_wt_resume() {
+    _git_wt_check_repo || return 1
+
+    local selected_branch=""
+    local selected_path=""
+
+    _git_wt_select_worktree selected_branch selected_path "$1" || return 1
+
+    cd "$selected_path"
+    echo -e "Switched to worktree: ${GIT_WT_COLOR_BRANCH}$selected_branch${GIT_WT_COLOR_RESET}"
+}
+
+# Delete a worktree (interactive selection + finish semantics)
+_git_wt_delete() {
+    local finish_args=()
+    local filter=""
+
+    # Parse arguments - collect finish flags and optional filter
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --pr|--keep-branch|--rm|-F|--force)
+                finish_args+=("$1")
+                shift
+                ;;
+            -P|--no-push)
+                finish_args+=("$1")
+                shift
+                ;;
+            -*)
+                echo -e "${GIT_WT_COLOR_ERROR}Error: Unknown option '$1'${GIT_WT_COLOR_RESET}" >&2
+                return 1
+                ;;
+            *)
+                if [ -z "$filter" ]; then
+                    filter="$1"
+                else
+                    echo -e "${GIT_WT_COLOR_ERROR}Error: Too many arguments${GIT_WT_COLOR_RESET}" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    _git_wt_check_repo || return 1
+
+    local selected_branch=""
+    local selected_path=""
+
+    _git_wt_select_worktree selected_branch selected_path "$filter" || return 1
+
+    echo -e "Finishing worktree: ${GIT_WT_COLOR_BRANCH}$selected_branch${GIT_WT_COLOR_RESET}"
+    _git_wt_finish "${finish_args[@]}" "$selected_branch"
 }
 
 # Go back to main worktree
@@ -439,6 +509,7 @@ _git_wt_finish() {
     local keep_branch=false
     local no_push=false
     local force_remove=false
+    local force=false
     local branch_name=""
 
     # Parse arguments
@@ -458,6 +529,10 @@ _git_wt_finish() {
                 ;;
             --rm)
                 force_remove=true
+                shift
+                ;;
+            -F|--force)
+                force=true
                 shift
                 ;;
             -*)
@@ -509,9 +584,15 @@ _git_wt_finish() {
 
     # Check for uncommitted changes
     if ! git -C "$worktree_path" diff-index --quiet HEAD -- 2>/dev/null; then
-        echo -e "${GIT_WT_COLOR_ERROR}Error: Worktree has uncommitted changes${GIT_WT_COLOR_RESET}" >&2
-        git -C "$worktree_path" status --short
-        return 1
+        if [ "$force" = true ]; then
+            echo -e "${GIT_WT_COLOR_WARNING}Warning: Worktree has uncommitted changes (forcing removal):${GIT_WT_COLOR_RESET}" >&2
+            git -C "$worktree_path" status --short
+        else
+            echo -e "${GIT_WT_COLOR_ERROR}Error: Worktree has uncommitted changes${GIT_WT_COLOR_RESET}" >&2
+            git -C "$worktree_path" status --short
+            echo -e "${GIT_WT_COLOR_DIM}Use --force to remove anyway${GIT_WT_COLOR_RESET}" >&2
+            return 1
+        fi
     fi
 
     # Push branch unless --no-push
@@ -550,7 +631,11 @@ _git_wt_finish() {
 
     # Remove worktree
     echo -e "Removing worktree ${GIT_WT_COLOR_PATH}$worktree_path${GIT_WT_COLOR_RESET}..."
-    git -C "$main_path" worktree remove "$worktree_path"
+    if [ "$force" = true ]; then
+        git -C "$main_path" worktree remove --force "$worktree_path"
+    else
+        git -C "$main_path" worktree remove "$worktree_path"
+    fi
 
     # Decide whether to delete branch
     local should_delete=false
@@ -799,9 +884,12 @@ COMMANDS:
   init|i [path]                  Initialize worktree structure
                                  (Creates main/ and trees/ directories)
 
-  start|s [options] BRANCH       Create new feature branch worktree
+  start|s [options] BRANCH       Create new feature branch worktree and cd to it
     -s, --source SOURCE          Source branch (default: current branch)
-    -c, --cd                     Auto-cd to new worktree
+    -C, --no-cd                  Don't auto-cd to new worktree
+
+  create|c [options] BRANCH      Create new feature branch worktree (no cd)
+                                 (Same as: start --no-cd)
 
   resume|r [filter]              Switch to existing worktree
                                  (Shows menu if multiple matches)
@@ -813,8 +901,12 @@ COMMANDS:
     --keep-branch                Don't delete branch
     -P, --no-push                Don't push before finishing
     --rm                         Force delete branch
+    -F, --force                  Force removal even with uncommitted changes
 
-  cancel|c [options] [branch]    Remove worktree without cleanup
+  delete|d [options] [filter]    Select and finish a worktree interactively
+                                 (Accepts all finish options)
+
+  cancel|x [options] [branch]    Remove worktree without cleanup
     --delete-branch              Also delete the branch (with confirmation)
 
   list|l                         Show all worktrees
@@ -831,11 +923,11 @@ EXAMPLES:
   # Initialize a repo for worktrees
   git-wt init
 
-  # Create a feature branch from current branch
+  # Create a feature branch and cd to it (default)
   git-wt start feature/new-thing
 
-  # Create a feature from main and cd to it
-  git-wt start -s main -c feature/fix-bug
+  # Create from main without cd
+  git-wt create -s main feature/fix-bug
 
   # Switch to a worktree
   git-wt resume feature/new-thing
@@ -846,14 +938,22 @@ EXAMPLES:
   # Finish and create PR
   git-wt finish --pr
 
+  # Interactively select and delete a worktree
+  git-wt delete
+
+  # Force-finish a worktree with uncommitted changes
+  git-wt finish --force feature/wip
+
   # Cancel a worktree and delete branch
   git-wt cancel --delete-branch feature/old
 
 ALIASES:
   gwt   - Shortcut for git-wt
   gwts  - git-wt start
+  gwtc  - git-wt create
   gwtr  - git-wt resume
   gwtb  - git-wt back
+  gwtd  - git-wt delete
   gwtl  - git-wt list
 EOF
 }
@@ -861,8 +961,10 @@ EOF
 # Aliases for convenience
 alias gwt='git-wt'
 alias gwts='git-wt start'
+alias gwtc='git-wt create'
 alias gwtr='git-wt resume'
 alias gwtb='git-wt back'
+alias gwtd='git-wt delete'
 alias gwtl='git-wt list'
 alias gwtst='git-wt status'
 
@@ -873,7 +975,7 @@ _git_wt_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="init start resume back finish cancel list status prune sync help"
+    commands="init start create resume back finish delete cancel list status prune sync help"
 
     # Complete main commands
     if [ $COMP_CWORD -eq 1 ]; then
@@ -884,21 +986,29 @@ _git_wt_completion() {
     # Complete subcommand options
     local cmd="${COMP_WORDS[1]}"
     case "$cmd" in
-        start|s)
+        start|s|create|c)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "-s --source -c --cd" -- "$cur") )
+                COMPREPLY=( $(compgen -W "-s --source -C --no-cd" -- "$cur") )
             fi
             ;;
         finish|f)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--pr --keep-branch -P --no-push --rm" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--pr --keep-branch -P --no-push --rm -F --force" -- "$cur") )
             else
                 # Complete with branch names from worktrees
                 local branches=$(_git_wt_get_worktree_branches)
                 COMPREPLY=( $(compgen -W "$branches" -- "$cur") )
             fi
             ;;
-        cancel|c)
+        delete|d)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--pr --keep-branch -P --no-push --rm -F --force" -- "$cur") )
+            else
+                local branches=$(_git_wt_get_worktree_branches)
+                COMPREPLY=( $(compgen -W "$branches" -- "$cur") )
+            fi
+            ;;
+        cancel|x)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "--delete-branch" -- "$cur") )
             else
