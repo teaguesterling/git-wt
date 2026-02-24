@@ -197,7 +197,33 @@ git-wt() {
 
 # Initialize worktree structure
 _git_wt_init() {
-    local project_path="${1:-.}"
+    local auto_cd=true
+    local project_path=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -C|--no-cd)
+                auto_cd=false
+                shift
+                ;;
+            -*)
+                echo -e "${GIT_WT_COLOR_ERROR}Error: Unknown option '$1'${GIT_WT_COLOR_RESET}" >&2
+                return 1
+                ;;
+            *)
+                if [ -z "$project_path" ]; then
+                    project_path="$1"
+                else
+                    echo -e "${GIT_WT_COLOR_ERROR}Error: Too many arguments${GIT_WT_COLOR_RESET}" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    project_path="${project_path:-.}"
 
     # Resolve to absolute path
     if ! project_path="$(cd "$project_path" 2>/dev/null && pwd)"; then
@@ -283,6 +309,11 @@ EOF
     echo
     echo "Create worktrees with:"
     echo "  git-wt start <branch-name>"
+
+    if [ "$auto_cd" = true ]; then
+        cd "$parent_dir/$project_name/$GIT_WT_MAIN_DIR"
+        echo -e "${GIT_WT_COLOR_DIM}Changed directory to main worktree${GIT_WT_COLOR_RESET}"
+    fi
 }
 
 # Start a new feature branch worktree
@@ -881,8 +912,9 @@ USAGE:
   git-wt <command> [options] [args]
 
 COMMANDS:
-  init|i [path]                  Initialize worktree structure
+  init|i [options] [path]         Initialize worktree structure and cd to main/
                                  (Creates main/ and trees/ directories)
+    -C, --no-cd                  Stay in parent directory after init
 
   start|s [options] BRANCH       Create new feature branch worktree and cd to it
     -s, --source SOURCE          Source branch (default: current branch)
@@ -986,6 +1018,11 @@ _git_wt_completion() {
     # Complete subcommand options
     local cmd="${COMP_WORDS[1]}"
     case "$cmd" in
+        init|i)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-C --no-cd" -- "$cur") )
+            fi
+            ;;
         start|s|create|c)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=( $(compgen -W "-s --source -C --no-cd" -- "$cur") )
