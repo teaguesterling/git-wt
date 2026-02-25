@@ -91,6 +91,24 @@ _git_wt_get_shared_paths() {
     fi
 }
 
+# Helper: Check for uncommitted changes, excluding shared paths
+# Returns 0 if there are real uncommitted changes, 1 if clean
+_git_wt_has_uncommitted_changes() {
+    local worktree_path="$1"
+
+    # Build exclude pathspecs from shared config
+    local exclude_args=()
+    local shared_paths=$(_git_wt_get_shared_paths)
+    if [ -n "$shared_paths" ]; then
+        while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            exclude_args+=(":(exclude)$path")
+        done <<< "$shared_paths"
+    fi
+
+    ! git -C "$worktree_path" diff-index --quiet HEAD -- "${exclude_args[@]}" 2>/dev/null
+}
+
 # Helper: Create symlinks for shared paths
 _git_wt_create_shared_symlinks() {
     local worktree_path="$1"
@@ -664,8 +682,8 @@ _git_wt_finish() {
         return 1
     fi
 
-    # Check for uncommitted changes
-    if ! git -C "$worktree_path" diff-index --quiet HEAD -- 2>/dev/null; then
+    # Check for uncommitted changes (excluding shared/symlinked paths)
+    if _git_wt_has_uncommitted_changes "$worktree_path"; then
         if [ "$force" = true ]; then
             echo -e "${GIT_WT_COLOR_WARNING}Warning: Worktree has uncommitted changes (forcing removal):${GIT_WT_COLOR_RESET}" >&2
             git -C "$worktree_path" status --short
@@ -711,9 +729,11 @@ _git_wt_finish() {
     # Move to main before removing worktree
     cd "$main_path"
 
-    # Remove worktree
+    # Remove worktree (--force needed when shared paths create symlinks that
+    # replace submodules, since git sees type changes and refuses otherwise)
     echo -e "Removing worktree ${GIT_WT_COLOR_PATH}$worktree_path${GIT_WT_COLOR_RESET}..."
-    if [ "$force" = true ]; then
+    local shared_paths=$(_git_wt_get_shared_paths)
+    if [ "$force" = true ] || [ -n "$shared_paths" ]; then
         git -C "$main_path" worktree remove --force "$worktree_path"
     else
         git -C "$main_path" worktree remove "$worktree_path"
@@ -810,8 +830,8 @@ _git_wt_cancel() {
         return 1
     fi
 
-    # Warn about uncommitted changes
-    if ! git -C "$worktree_path" diff-index --quiet HEAD -- 2>/dev/null; then
+    # Warn about uncommitted changes (excluding shared/symlinked paths)
+    if _git_wt_has_uncommitted_changes "$worktree_path"; then
         echo -e "${GIT_WT_COLOR_WARNING}Warning: Worktree has uncommitted changes:${GIT_WT_COLOR_RESET}" >&2
         git -C "$worktree_path" status --short
         echo -n "Continue with removal? (y/N): "
