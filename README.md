@@ -209,7 +209,7 @@ git-wt finish feature/old-thing        # Finish specific worktree
 git-wt finish --rm                     # Force delete branch
 ```
 
-**Alias:** `f`
+**Alias:** `f`, `gwtf`
 
 **Safety features:**
 - Checks for uncommitted changes
@@ -231,7 +231,7 @@ git-wt cancel feature/abandoned        # Remove specific worktree
 git-wt cancel --delete-branch          # Remove worktree and branch
 ```
 
-**Alias:** `c`
+**Alias:** `c`, `gwtx`
 
 **Safety features:**
 - Warns about uncommitted changes
@@ -328,6 +328,8 @@ Convenient shortcuts:
 - `gwts` - `git-wt start`
 - `gwtr` - `git-wt resume`
 - `gwtb` - `git-wt back`
+- `gwtf` - `git-wt finish`
+- `gwtx` - `git-wt cancel`
 - `gwtl` - `git-wt list`
 - `gwtst` - `git-wt status`
 
