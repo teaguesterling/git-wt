@@ -300,18 +300,34 @@ _git_wt_init() {
 
 EOF
 
-    # Auto-detect submodules and add to shared config
+    # Auto-detect initialized submodules and add to shared config
     local main_dir="$parent_dir/$project_name/$GIT_WT_MAIN_DIR"
-    local submodules
-    submodules=$(git -C "$main_dir" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
-    if [ -n "$submodules" ]; then
-        {
-            echo "# Submodules (auto-detected)"
-            echo "$submodules"
-            echo ""
-        } >> "$project_name/$GIT_WT_SHARED_CONFIG"
-        local count=$(echo "$submodules" | wc -l)
-        echo -e "${GIT_WT_COLOR_DIM}Added $count submodule(s) to shared paths${GIT_WT_COLOR_RESET}"
+    local all_submodules
+    all_submodules=$(git -C "$main_dir" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
+    if [ -n "$all_submodules" ]; then
+        local initialized=()
+        local skipped=()
+        while IFS= read -r sm_path; do
+            if [ -d "$main_dir/$sm_path/.git" ] || [ -f "$main_dir/$sm_path/.git" ]; then
+                initialized+=("$sm_path")
+            else
+                skipped+=("$sm_path")
+            fi
+        done <<< "$all_submodules"
+
+        if [ ${#initialized[@]} -gt 0 ]; then
+            {
+                echo "# Submodules (auto-detected)"
+                printf '%s\n' "${initialized[@]}"
+                echo ""
+            } >> "$project_name/$GIT_WT_SHARED_CONFIG"
+            echo -e "${GIT_WT_COLOR_DIM}Added ${#initialized[@]} submodule(s) to shared paths${GIT_WT_COLOR_RESET}"
+        fi
+
+        if [ ${#skipped[@]} -gt 0 ]; then
+            echo -e "${GIT_WT_COLOR_WARNING}Skipped ${#skipped[@]} uninitialized submodule(s): ${skipped[*]}${GIT_WT_COLOR_RESET}"
+            echo -e "${GIT_WT_COLOR_DIM}Initialize them in main and add to $GIT_WT_SHARED_CONFIG manually${GIT_WT_COLOR_RESET}"
+        fi
     fi
 
     echo "Done! Structure is now:"
@@ -334,8 +350,10 @@ EOF
 # Start a new feature branch worktree
 _git_wt_start() {
     local branch_name=""
+    local custom_path=""
     local source_branch=""
     local auto_cd=true
+    local positional=()
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -353,21 +371,30 @@ _git_wt_start() {
                 return 1
                 ;;
             *)
-                if [ -z "$branch_name" ]; then
-                    branch_name="$1"
-                else
-                    echo -e "${GIT_WT_COLOR_ERROR}Error: Too many arguments${GIT_WT_COLOR_RESET}" >&2
-                    return 1
-                fi
+                positional+=("$1")
                 shift
                 ;;
         esac
     done
 
-    # Validate branch name
-    if [ -z "$branch_name" ]; then
+    # Interpret positional args: PATH BRANCH or just BRANCH
+    if [ ${#positional[@]} -eq 0 ]; then
         echo -e "${GIT_WT_COLOR_ERROR}Error: Branch name required${GIT_WT_COLOR_RESET}" >&2
-        echo "Usage: git-wt start [-s|--source SOURCE_BRANCH] [-C|--no-cd] BRANCH_NAME" >&2
+        echo "Usage: git-wt start [-s|--source SOURCE] [-C|--no-cd] [PATH] BRANCH" >&2
+        return 1
+    elif [ ${#positional[@]} -eq 1 ]; then
+        local arg="${positional[0]}"
+        if [[ "$arg" == /* ]] || [[ "$arg" == ./* ]] || [[ "$arg" == ../* ]]; then
+            echo -e "${GIT_WT_COLOR_ERROR}Error: '$arg' looks like a path — provide a branch name too${GIT_WT_COLOR_RESET}" >&2
+            echo "Usage: git-wt start PATH BRANCH" >&2
+            return 1
+        fi
+        branch_name="$arg"
+    elif [ ${#positional[@]} -eq 2 ]; then
+        custom_path="${positional[0]}"
+        branch_name="${positional[1]}"
+    else
+        echo -e "${GIT_WT_COLOR_ERROR}Error: Too many arguments${GIT_WT_COLOR_RESET}" >&2
         return 1
     fi
 
@@ -391,8 +418,17 @@ _git_wt_start() {
         return 1
     fi
 
-    # Create worktree
-    local worktree_path="$trees_path/$branch_name"
+    # Determine worktree path
+    local worktree_path
+    if [ -n "$custom_path" ]; then
+        # Resolve to absolute path
+        if [[ "$custom_path" != /* ]]; then
+            custom_path="$(cd "$PWD" && realpath -m "$custom_path")"
+        fi
+        worktree_path="$custom_path"
+    else
+        worktree_path="$trees_path/$branch_name"
+    fi
     echo -e "Creating worktree for branch ${GIT_WT_COLOR_BRANCH}$branch_name${GIT_WT_COLOR_RESET} from ${GIT_WT_COLOR_BRANCH}$source_branch${GIT_WT_COLOR_RESET}"
 
     if ! git -C "$main_path" worktree add -b "$branch_name" "$worktree_path" "$source_branch"; then
@@ -931,12 +967,13 @@ COMMANDS:
                                  (Creates main/ and trees/ directories)
     -C, --no-cd                  Stay in parent directory after init
 
-  start|s [options] BRANCH       Create new feature branch worktree and cd to it
-    -s, --source SOURCE          Source branch (default: current branch)
-    -C, --no-cd                  Don't auto-cd to new worktree
+  start|s [options] [PATH] BRANCH  Create new feature branch worktree and cd to it
+    -s, --source SOURCE            Source branch (default: current branch)
+    -C, --no-cd                    Don't auto-cd to new worktree
+                                   PATH starts with / ./ or ../ for custom location
 
-  create|c [options] BRANCH      Create new feature branch worktree (no cd)
-                                 (Same as: start --no-cd)
+  create|c [options] [PATH] BRANCH  Create new feature branch worktree (no cd)
+                                    (Same as: start --no-cd)
 
   resume|r [filter]              Switch to existing worktree
                                  (Shows menu if multiple matches)
@@ -972,6 +1009,9 @@ EXAMPLES:
 
   # Create a feature branch and cd to it (default)
   git-wt start feature/new-thing
+
+  # Create a worktree at a custom path
+  git-wt start ../my-worktree feature/new-thing
 
   # Create from main without cd
   git-wt create -s main feature/fix-bug
