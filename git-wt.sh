@@ -1061,6 +1061,8 @@ ALIASES:
   gwtr  - git-wt resume
   gwtb  - git-wt back
   gwtd  - git-wt delete
+  gwtf  - git-wt finish
+  gwtx  - git-wt cancel
   gwtl  - git-wt list
 EOF
 }
@@ -1072,6 +1074,8 @@ alias gwtc='git-wt create'
 alias gwtr='git-wt resume'
 alias gwtb='git-wt back'
 alias gwtd='git-wt delete'
+alias gwtf='git-wt finish'
+alias gwtx='git-wt cancel'
 alias gwtl='git-wt list'
 alias gwtst='git-wt status'
 
