@@ -62,9 +62,11 @@ gwt cancel --delete-branch    # Remove worktree and branch (with warnings)
 |---------|-------|--------------|
 | `git-wt init` | `gwt i` | Set up repo for worktrees |
 | `git-wt start` | `gwts` | Create new feature worktree |
+| `git-wt create` | `gwtc` | Create worktree (no cd) |
 | `git-wt resume` | `gwtr` | Switch to worktree |
 | `git-wt back` | `gwtb` | Return to main |
 | `git-wt finish` | `gwtf` | Smart cleanup & remove |
+| `git-wt delete` | `gwtd` | Interactive select & finish |
 | `git-wt cancel` | `gwtx` | Remove worktree only |
 | `git-wt list` | `gwtl` | Show all worktrees |
 | `git-wt status` | `gwt st` | Current worktree info |
