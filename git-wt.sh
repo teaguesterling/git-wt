@@ -430,10 +430,37 @@ _git_wt_start() {
     fi
 
     # Check if branch already exists
+    local branch_exists=false
     if git -C "$main_path" show-ref --verify --quiet "refs/heads/$branch_name"; then
-        echo -e "${GIT_WT_COLOR_WARNING}Warning: Branch '$branch_name' already exists${GIT_WT_COLOR_RESET}" >&2
-        echo -e "Use ${GIT_WT_COLOR_BRANCH}git-wt resume $branch_name${GIT_WT_COLOR_RESET} to switch to it" >&2
-        return 1
+        # Branch exists — check if it has a live worktree
+        local existing_wt_path=""
+        local stale_wt_path=""
+        while IFS='|' read -r wt_path wt_branch; do
+            if [ "$wt_branch" = "$branch_name" ]; then
+                if [ -d "$wt_path" ]; then
+                    existing_wt_path="$wt_path"
+                else
+                    stale_wt_path="$wt_path"
+                fi
+                break
+            fi
+        done < <(git -C "$main_path" worktree list --porcelain | awk \
+            '/^worktree/ {path=$2} /^branch/ {branch=$2; sub("refs/heads/", "", branch); print path "|" branch}')
+
+        if [ -n "$existing_wt_path" ]; then
+            # Live worktree exists — keep current behavior
+            echo -e "${GIT_WT_COLOR_WARNING}Warning: Branch '$branch_name' already has an active worktree${GIT_WT_COLOR_RESET}" >&2
+            echo -e "Use ${GIT_WT_COLOR_BRANCH}git-wt resume $branch_name${GIT_WT_COLOR_RESET} to switch to it" >&2
+            return 1
+        fi
+
+        # No live worktree — recover the orphaned branch
+        if [ -n "$stale_wt_path" ]; then
+            echo "Pruning stale worktree entry for '$branch_name'..."
+            git -C "$main_path" worktree prune
+        fi
+
+        branch_exists=true
     fi
 
     # Determine worktree path
@@ -447,11 +474,18 @@ _git_wt_start() {
     else
         worktree_path="$trees_path/$branch_name"
     fi
-    echo -e "Creating worktree for branch ${GIT_WT_COLOR_BRANCH}$branch_name${GIT_WT_COLOR_RESET} from ${GIT_WT_COLOR_BRANCH}$source_branch${GIT_WT_COLOR_RESET}"
-
-    if ! git -C "$main_path" worktree add -b "$branch_name" "$worktree_path" "$source_branch"; then
-        echo -e "${GIT_WT_COLOR_ERROR}Error: Failed to create worktree${GIT_WT_COLOR_RESET}" >&2
-        return 1
+    if [ "$branch_exists" = true ]; then
+        echo -e "Recovering worktree for existing branch ${GIT_WT_COLOR_BRANCH}$branch_name${GIT_WT_COLOR_RESET}"
+        if ! git -C "$main_path" worktree add "$worktree_path" "$branch_name"; then
+            echo -e "${GIT_WT_COLOR_ERROR}Error: Failed to create worktree for existing branch${GIT_WT_COLOR_RESET}" >&2
+            return 1
+        fi
+    else
+        echo -e "Creating worktree for branch ${GIT_WT_COLOR_BRANCH}$branch_name${GIT_WT_COLOR_RESET} from ${GIT_WT_COLOR_BRANCH}$source_branch${GIT_WT_COLOR_RESET}"
+        if ! git -C "$main_path" worktree add -b "$branch_name" "$worktree_path" "$source_branch"; then
+            echo -e "${GIT_WT_COLOR_ERROR}Error: Failed to create worktree${GIT_WT_COLOR_RESET}" >&2
+            return 1
+        fi
     fi
 
     echo -e "${GIT_WT_COLOR_PATH}Worktree created at: $worktree_path${GIT_WT_COLOR_RESET}"
@@ -546,6 +580,12 @@ _git_wt_resume() {
     local selected_path=""
 
     _git_wt_select_worktree selected_branch selected_path "$1" || return 1
+
+    if [ ! -d "$selected_path" ]; then
+        echo -e "${GIT_WT_COLOR_ERROR}Error: Worktree directory no longer exists: $selected_path${GIT_WT_COLOR_RESET}" >&2
+        echo -e "Run '${GIT_WT_COLOR_BRANCH}git-wt start $selected_branch${GIT_WT_COLOR_RESET}' to recreate it." >&2
+        return 1
+    fi
 
     cd "$selected_path"
     echo -e "Switched to worktree: ${GIT_WT_COLOR_BRANCH}$selected_branch${GIT_WT_COLOR_RESET}"
