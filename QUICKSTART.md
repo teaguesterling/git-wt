@@ -145,7 +145,7 @@ gwt finish --keep-branch       # Remove worktree but keep branch
 Run `git-wt init` first in your repo.
 
 ### Manually deleted a worktree directory
-Run `gwt prune` to clean up git's tracking.
+Run `gwts branch-name` to recover it — `start` detects the orphaned branch, auto-prunes stale entries, and recreates the worktree. Or run `gwt prune` to just clean up git's tracking.
 
 ### Want to see what a command does
 Run `git-wt help` for detailed help.

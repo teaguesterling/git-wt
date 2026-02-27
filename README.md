@@ -143,7 +143,7 @@ git-wt init ~/projects/myapp   # Initialize specific repo
 
 ### `git-wt start [options] BRANCH_NAME`
 
-Create a new feature branch worktree.
+Create a new feature branch worktree. If the branch already exists but its worktree is missing (orphaned branch), `start` automatically recovers it by creating a new worktree for the existing branch.
 
 **Options:**
 - `-s, --source SOURCE` - Source branch (default: current branch)
@@ -153,6 +153,7 @@ Create a new feature branch worktree.
 git-wt start feature/auth                    # From current branch
 git-wt start -s main feature/auth            # From main
 git-wt start -s main -c feature/auth         # From main, auto-cd
+git-wt start feature/orphaned                # Recovers existing branch with missing worktree
 ```
 
 **Alias:** `s`, `gwts`
@@ -161,7 +162,7 @@ git-wt start -s main -c feature/auth         # From main, auto-cd
 
 ### `git-wt resume [filter]`
 
-Switch to an existing worktree. Shows interactive menu if multiple matches.
+Switch to an existing worktree. Shows interactive menu if multiple matches. If the worktree directory no longer exists, shows an error with instructions to recover using `start`.
 
 ```bash
 git-wt resume                  # Show all worktrees
@@ -391,6 +392,14 @@ git-wt finish
 git-wt finish --pr
 ```
 
+### Recovering an Orphaned Branch
+
+```bash
+# Worktree directory was deleted (manually or by prune), but branch still exists
+git-wt start feature/my-branch  # Detects orphaned branch, recreates worktree
+# Stale worktree entries are auto-pruned
+```
+
 ### Abandoned Work
 
 ```bash
@@ -454,6 +463,7 @@ git-wt finish <TAB>       # Show worktree branches and options
 4. **Use filters with resume** - `git-wt resume auth` is faster than the menu
 5. **Let finish be smart** - the default behavior is usually what you want
 6. **Use cancel for experiments** - removes worktree but keeps branch by default
+7. **Deleted a worktree directory?** - Just run `git-wt start branch-name` to recover it
 
 ## Comparison with Plain Git Worktree
 
