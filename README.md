@@ -68,8 +68,10 @@ nano .git-worktree-shared
 # Start a new feature
 git-wt start feature/new-thing
 
-# Work on it...
-cd ../trees/feature/new-thing
+# Work on it... (You'll be automatically moved into ../trees/feature/new-thing)
+# Use git-wt create ... if you don't want to change directory
+#git-wt create feature/new-thing
+#cd ../trees/feature/new-thing
 
 # Switch between worktrees
 git-wt resume feature/new-thing
