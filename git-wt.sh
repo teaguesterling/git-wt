@@ -698,9 +698,14 @@ _git_wt_finish() {
     # Determine which worktree to finish
     if [ -z "$branch_name" ]; then
         # Use current branch if in a worktree
-        branch_name=$(_git_wt_current_branch)
         local current_path=$(git rev-parse --show-toplevel 2>/dev/null)
-
+        if [ -z "$current_path" ]; then
+            echo -e "${GIT_WT_COLOR_ERROR}Error: Not in a worktree — specify a branch name${GIT_WT_COLOR_RESET}" >&2
+            echo "Usage: git-wt finish [options] <branch>" >&2
+            echo "Or use: git-wt delete (interactive selection)" >&2
+            return 1
+        fi
+        branch_name=$(_git_wt_current_branch)
         if [ "$current_path" = "$main_path" ]; then
             echo -e "${GIT_WT_COLOR_ERROR}Error: Cannot finish main worktree${GIT_WT_COLOR_RESET}" >&2
             echo "Please specify a branch name or run from a feature worktree" >&2
@@ -847,9 +852,13 @@ _git_wt_cancel() {
 
     # Determine which worktree to cancel
     if [ -z "$branch_name" ]; then
-        branch_name=$(_git_wt_current_branch)
         local current_path=$(git rev-parse --show-toplevel 2>/dev/null)
-
+        if [ -z "$current_path" ]; then
+            echo -e "${GIT_WT_COLOR_ERROR}Error: Not in a worktree — specify a branch name${GIT_WT_COLOR_RESET}" >&2
+            echo "Usage: git-wt cancel [options] <branch>" >&2
+            return 1
+        fi
+        branch_name=$(_git_wt_current_branch)
         if [ "$current_path" = "$main_path" ]; then
             echo -e "${GIT_WT_COLOR_ERROR}Error: Cannot cancel main worktree${GIT_WT_COLOR_RESET}" >&2
             return 1
@@ -950,6 +959,7 @@ _git_wt_list() {
 _git_wt_status() {
     _git_wt_check_repo || return 1
 
+    local root=$(_git_wt_find_root)
     local main_path=$(_git_wt_main_path)
     local current_path=$(git rev-parse --show-toplevel 2>/dev/null)
     local current_branch=$(_git_wt_current_branch)
@@ -957,20 +967,23 @@ _git_wt_status() {
     echo "Git worktree status:"
     echo ""
 
-    if [ "$current_path" = "$main_path" ]; then
+    if [ -z "$current_path" ]; then
+        echo -e "  Current: ${GIT_WT_COLOR_PATH}worktree root${GIT_WT_COLOR_RESET}"
+        echo -e "  Path:    ${GIT_WT_COLOR_PATH}$root${GIT_WT_COLOR_RESET}"
+    elif [ "$current_path" = "$main_path" ]; then
         echo -e "  Current: ${GIT_WT_COLOR_BRANCH}main${GIT_WT_COLOR_RESET} worktree"
+        echo -e "  Branch:  ${GIT_WT_COLOR_BRANCH}$current_branch${GIT_WT_COLOR_RESET}"
+        echo -e "  Path:    ${GIT_WT_COLOR_PATH}$current_path${GIT_WT_COLOR_RESET}"
     else
         echo -e "  Current: ${GIT_WT_COLOR_BRANCH}$current_branch${GIT_WT_COLOR_RESET} worktree"
+        echo -e "  Branch:  ${GIT_WT_COLOR_BRANCH}$current_branch${GIT_WT_COLOR_RESET}"
+        echo -e "  Path:    ${GIT_WT_COLOR_PATH}$current_path${GIT_WT_COLOR_RESET}"
     fi
 
-    echo -e "  Branch:  ${GIT_WT_COLOR_BRANCH}$current_branch${GIT_WT_COLOR_RESET}"
-    echo -e "  Path:    ${GIT_WT_COLOR_PATH}$current_path${GIT_WT_COLOR_RESET}"
     echo ""
 
-    # Count worktrees
     local total=$(git -C "$main_path" worktree list | wc -l)
     local feature=$((total - 1))
-
     echo -e "  ${GIT_WT_COLOR_DIM}Total worktrees: $total (1 main + $feature feature)${GIT_WT_COLOR_RESET}"
 }
 
