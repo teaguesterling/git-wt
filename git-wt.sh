@@ -476,16 +476,20 @@ _git_wt_start() {
     fi
     if [ "$branch_exists" = true ]; then
         echo -e "Recovering worktree for existing branch ${GIT_WT_COLOR_BRANCH}$branch_name${GIT_WT_COLOR_RESET}"
-        if ! git -C "$main_path" worktree add "$worktree_path" "$branch_name"; then
+        if ! GIT_LFS_SKIP_SMUDGE=1 git -C "$main_path" worktree add "$worktree_path" "$branch_name"; then
             echo -e "${GIT_WT_COLOR_ERROR}Error: Failed to create worktree for existing branch${GIT_WT_COLOR_RESET}" >&2
             return 1
         fi
+        # Fetch LFS objects after worktree creation (non-fatal if some objects are missing)
+        git -C "$worktree_path" lfs pull 2>/dev/null || true
     else
         echo -e "Creating worktree for branch ${GIT_WT_COLOR_BRANCH}$branch_name${GIT_WT_COLOR_RESET} from ${GIT_WT_COLOR_BRANCH}$source_branch${GIT_WT_COLOR_RESET}"
-        if ! git -C "$main_path" worktree add -b "$branch_name" "$worktree_path" "$source_branch"; then
+        if ! GIT_LFS_SKIP_SMUDGE=1 git -C "$main_path" worktree add -b "$branch_name" "$worktree_path" "$source_branch"; then
             echo -e "${GIT_WT_COLOR_ERROR}Error: Failed to create worktree${GIT_WT_COLOR_RESET}" >&2
             return 1
         fi
+        # Fetch LFS objects after worktree creation (non-fatal if some objects are missing)
+        git -C "$worktree_path" lfs pull 2>/dev/null || true
     fi
 
     echo -e "${GIT_WT_COLOR_PATH}Worktree created at: $worktree_path${GIT_WT_COLOR_RESET}"
