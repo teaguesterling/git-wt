@@ -77,6 +77,55 @@ _git_wt_check_repo() {
     return 0
 }
 
+# Helper: Emit worktrees as "<path><US><branch>" records, one per line,
+# where <US> is the ASCII unit separator (\x1f). Parses
+# `git worktree list --porcelain` without whitespace-splitting so paths
+# containing spaces survive intact. Detached/bare entries are emitted
+# with an empty branch field. \x1f cannot appear in a git ref name and
+# is vanishingly unlikely in a path (unlike '|' or whitespace).
+# Consume with: while IFS=$'\x1f' read -r path branch; do ...
+_git_wt_worktree_records() {
+    local main_path="$1"
+    local sep=$'\x1f'
+    local line wt_path="" wt_branch="" have_record=false
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*)
+                # New record starts; flush the previous one
+                if [ "$have_record" = true ]; then
+                    printf '%s%s%s\n' "$wt_path" "$sep" "$wt_branch"
+                fi
+                wt_path="${line#worktree }"
+                wt_branch=""
+                have_record=true
+                ;;
+            "branch "*)
+                wt_branch="${line#branch }"
+                wt_branch="${wt_branch#refs/heads/}"
+                ;;
+        esac
+    done < <(git -C "$main_path" worktree list --porcelain 2>/dev/null)
+    if [ "$have_record" = true ]; then
+        printf '%s%s%s\n' "$wt_path" "$sep" "$wt_branch"
+    fi
+}
+
+# Helper: Validate a shared path from $GIT_WT_SHARED_CONFIG before it is
+# used to rm -rf / symlink inside a worktree. Rejects absolute paths and
+# any path containing a `..` component (leading, embedded, or trailing),
+# since those can resolve outside the worktree and make the subsequent
+# `rm -rf` destructive far beyond the tree.
+_git_wt_shared_path_is_safe() {
+    local path="$1"
+    case "$path" in
+        /*) return 1 ;;              # absolute path
+    esac
+    case "/$path/" in
+        */../*) return 1 ;;          # any `..` component
+    esac
+    return 0
+}
+
 # Helper: Get shared paths from config file
 _git_wt_get_shared_paths() {
     local root=$(_git_wt_find_root)
@@ -102,6 +151,8 @@ _git_wt_has_uncommitted_changes() {
     if [ -n "$shared_paths" ]; then
         while IFS= read -r path; do
             [ -z "$path" ] && continue
+            # Ignore unsafe (absolute / `..`) entries; they are never linked
+            _git_wt_shared_path_is_safe "$path" || continue
             exclude_args+=(":(exclude)$path")
         done <<< "$shared_paths"
     fi
@@ -129,6 +180,13 @@ _git_wt_create_shared_symlinks() {
         # Skip empty lines
         [ -z "$path" ] && continue
 
+        # Reject absolute / `..` paths BEFORE anything destructive: a stray
+        # `..` entry would make the rm -rf below escape the worktree.
+        if ! _git_wt_shared_path_is_safe "$path"; then
+            echo -e "${GIT_WT_COLOR_WARNING}Warning: Skipping unsafe shared path (absolute or contains '..'): $path${GIT_WT_COLOR_RESET}" >&2
+            continue
+        fi
+
         local source="$main_path/$path"
         local target="$worktree_path/$path"
 
@@ -136,6 +194,20 @@ _git_wt_create_shared_symlinks() {
         if [ ! -e "$source" ]; then
             echo -e "${GIT_WT_COLOR_WARNING}Warning: Shared path not found in main: $path${GIT_WT_COLOR_RESET}" >&2
             continue
+        fi
+
+        # Defense in depth: after resolving symlinks, the target must still
+        # be a strict descendant of the worktree before we rm -rf it (a
+        # checked-out symlink component could otherwise redirect it outside).
+        if command -v realpath >/dev/null 2>&1; then
+            local resolved_root resolved_target
+            resolved_root=$(realpath -m -- "$worktree_path" 2>/dev/null)
+            resolved_target=$(realpath -m -- "$target" 2>/dev/null)
+            if [ -z "$resolved_root" ] || [ -z "$resolved_target" ] || \
+               [ "${resolved_target#"$resolved_root"/}" = "$resolved_target" ]; then
+                echo -e "${GIT_WT_COLOR_WARNING}Warning: Skipping shared path that resolves outside the worktree: $path${GIT_WT_COLOR_RESET}" >&2
+                continue
+            fi
         fi
 
         # Remove target if it exists (git worktree creates it)
@@ -320,8 +392,15 @@ EOF
 
     # Auto-detect initialized submodules and add to shared config
     local main_dir="$parent_dir/$project_name/$GIT_WT_MAIN_DIR"
-    local all_submodules
-    all_submodules=$(git -C "$main_dir" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null | awk '{print $2}')
+    local all_submodules=""
+    local sm_entry
+    # `git config -z --get-regexp` emits "<key>\n<value>" NUL-terminated;
+    # take everything after the first newline so submodule paths keep any
+    # embedded spaces (a whitespace-split would truncate them).
+    while IFS= read -r -d '' sm_entry; do
+        all_submodules+="${sm_entry#*$'\n'}"$'\n'
+    done < <(git -C "$main_dir" config -f .gitmodules -z --get-regexp '^submodule\..*\.path$' 2>/dev/null)
+    all_submodules="${all_submodules%$'\n'}"
     if [ -n "$all_submodules" ]; then
         local initialized=()
         local skipped=()
@@ -435,7 +514,7 @@ _git_wt_start() {
         # Branch exists — check if it has a live worktree
         local existing_wt_path=""
         local stale_wt_path=""
-        while IFS='|' read -r wt_path wt_branch; do
+        while IFS=$'\x1f' read -r wt_path wt_branch; do
             if [ "$wt_branch" = "$branch_name" ]; then
                 if [ -d "$wt_path" ]; then
                     existing_wt_path="$wt_path"
@@ -444,8 +523,7 @@ _git_wt_start() {
                 fi
                 break
             fi
-        done < <(git -C "$main_path" worktree list --porcelain | awk \
-            '/^worktree/ {path=$2} /^branch/ {branch=$2; sub("refs/heads/", "", branch); print path "|" branch}')
+        done < <(_git_wt_worktree_records "$main_path")
 
         if [ -n "$existing_wt_path" ]; then
             # Live worktree exists — keep current behavior
@@ -526,7 +604,12 @@ _git_wt_select_worktree() {
     local worktrees=()
     local worktree_paths=()
 
-    while IFS='|' read -r path branch; do
+    while IFS=$'\x1f' read -r path branch; do
+        # Skip detached/bare entries (no branch to resume by)
+        if [ -z "$branch" ]; then
+            continue
+        fi
+
         # Skip main worktree
         if [ "$path" = "$main_path" ]; then
             continue
@@ -542,7 +625,7 @@ _git_wt_select_worktree() {
             worktrees+=("$branch")
             worktree_paths+=("$path")
         fi
-    done < <(git -C "$main_path" worktree list --porcelain | awk '/^worktree/ {path=$2} /^branch/ {branch=$2; sub("refs/heads/", "", branch); print path "|" branch}')
+    done < <(_git_wt_worktree_records "$main_path")
 
     if [ ${#worktrees[@]} -eq 0 ]; then
         if [ -n "$filter" ]; then
@@ -719,12 +802,12 @@ _git_wt_finish() {
 
     # Find the worktree
     local worktree_path=""
-    while IFS='|' read -r path branch; do
+    while IFS=$'\x1f' read -r path branch; do
         if [ "$branch" = "$branch_name" ]; then
             worktree_path="$path"
             break
         fi
-    done < <(git -C "$main_path" worktree list --porcelain | awk '/^worktree/ {path=$2} /^branch/ {branch=$2; sub("refs/heads/", "", branch); print path "|" branch}')
+    done < <(_git_wt_worktree_records "$main_path")
 
     if [ -z "$worktree_path" ]; then
         echo -e "${GIT_WT_COLOR_ERROR}Error: Worktree for branch '$branch_name' not found${GIT_WT_COLOR_RESET}" >&2
@@ -871,12 +954,12 @@ _git_wt_cancel() {
 
     # Find the worktree
     local worktree_path=""
-    while IFS='|' read -r path branch; do
+    while IFS=$'\x1f' read -r path branch; do
         if [ "$branch" = "$branch_name" ]; then
             worktree_path="$path"
             break
         fi
-    done < <(git -C "$main_path" worktree list --porcelain | awk '/^worktree/ {path=$2} /^branch/ {branch=$2; sub("refs/heads/", "", branch); print path "|" branch}')
+    done < <(_git_wt_worktree_records "$main_path")
 
     if [ -z "$worktree_path" ]; then
         echo -e "${GIT_WT_COLOR_ERROR}Error: Worktree for branch '$branch_name' not found${GIT_WT_COLOR_RESET}" >&2
@@ -904,7 +987,8 @@ _git_wt_cancel() {
     # Handle branch deletion
     if [ "$delete_branch" = true ]; then
         # Check if branch is merged
-        if git -C "$main_path" branch --merged | grep -q "^\s*$branch_name$"; then
+        # Exact fixed-string match: branch names may contain regex metachars
+        if git -C "$main_path" branch --merged --format='%(refname:short)' | grep -Fxq -- "$branch_name"; then
             echo -e "Deleting merged branch ${GIT_WT_COLOR_BRANCH}$branch_name${GIT_WT_COLOR_RESET}..."
             git -C "$main_path" branch -d "$branch_name"
         else
@@ -935,28 +1019,18 @@ _git_wt_list() {
     echo "Git worktrees:"
     echo ""
 
-    git -C "$main_path" worktree list --porcelain | awk -v main="$main_path" -v color_path="$GIT_WT_COLOR_PATH" -v color_branch="$GIT_WT_COLOR_BRANCH" -v color_dim="$GIT_WT_COLOR_DIM" -v color_reset="$GIT_WT_COLOR_RESET" '
-    /^worktree/ {
-        path=$2
-    }
-    /^branch/ {
-        branch=$2
-        sub("refs/heads/", "", branch)
-    }
-    /^$/ {
-        if (path) {
-            is_main = (path == main) ? " " color_dim "[main]" color_reset : ""
-            printf "  %s%-20s%s %s%s%s%s\n", color_branch, branch, color_reset, color_path, path, color_reset, is_main
-            path = ""
-            branch = ""
-        }
-    }
-    END {
-        if (path) {
-            is_main = (path == main) ? " " color_dim "[main]" color_reset : ""
-            printf "  %s%-20s%s %s%s%s%s\n", color_branch, branch, color_reset, color_path, path, color_reset, is_main
-        }
-    }'
+    local path branch is_main
+    while IFS=$'\x1f' read -r path branch; do
+        [ -z "$path" ] && continue
+        [ -z "$branch" ] && branch="(detached)"
+        is_main=""
+        if [ "$path" = "$main_path" ]; then
+            is_main=" ${GIT_WT_COLOR_DIM}[main]${GIT_WT_COLOR_RESET}"
+        fi
+        printf "  %b%-20s%b %b%s%b%b\n" \
+            "$GIT_WT_COLOR_BRANCH" "$branch" "$GIT_WT_COLOR_RESET" \
+            "$GIT_WT_COLOR_PATH" "$path" "$GIT_WT_COLOR_RESET" "$is_main"
+    done < <(_git_wt_worktree_records "$main_path")
 }
 
 # Show current worktree status
@@ -1200,7 +1274,10 @@ _git_wt_completion() {
 _git_wt_get_worktree_branches() {
     local main_path=$(_git_wt_main_path 2>/dev/null)
     if [ -n "$main_path" ]; then
-        git -C "$main_path" worktree list --porcelain 2>/dev/null | awk '/^branch/ {branch=$2; sub("refs/heads/", "", branch); print branch}'
+        local path branch
+        while IFS=$'\x1f' read -r path branch; do
+            [ -n "$branch" ] && printf '%s\n' "$branch"
+        done < <(_git_wt_worktree_records "$main_path")
     fi
 }
 
