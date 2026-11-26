@@ -164,3 +164,95 @@ make_wt_repo() {
     [ -L "$TEST_DIR/proj/trees/feature/link/.cache" ]
     [ -f "$TEST_DIR/proj/trees/feature/link/.cache/x" ]
 }
+
+# --- Submodule alternates guard (CQO-D2) ---------------------------------
+#
+# A submodule store in one worktree can borrow objects from a submodule
+# store in another worktree through objects/info/alternates (for example
+# after `git submodule update --reference <other tree>`). The lender store
+# lives in <common>/worktrees/<name>/modules/, which `git worktree remove`
+# deletes. Removing the lender then breaks the borrower. finish and cancel
+# must refuse, name the alternates file, and repoint only on request.
+
+# Build proj with a submodule "sub", tree A with its own sub store, and
+# tree B whose sub store borrows from A's store. Sets A_WT, B_WT, B_ALT.
+make_borrowing_trees() {
+    local src="$TEST_DIR/subsrc"
+    git init -q -b main "$src"
+    echo s > "$src/s.txt"
+    git -C "$src" add s.txt
+    git -C "$src" commit -q -m sub
+    make_wt_repo "$TEST_DIR/proj"
+    # file:// forces a real fetch: a plain local path would copy objects.
+    git -c protocol.file.allow=always submodule add -q "file://$src" sub
+    git commit -q -m "add sub"
+    git-wt start -C feature/a
+    A_WT="$TEST_DIR/proj/trees/feature/a"
+    git -C "$A_WT" -c protocol.file.allow=always submodule update -q --init
+    git-wt start -C feature/b
+    B_WT="$TEST_DIR/proj/trees/feature/b"
+    git -C "$B_WT" -c protocol.file.allow=always submodule update -q --init --reference "$A_WT/sub"
+    B_ALT="$(git -C "$B_WT/sub" rev-parse --absolute-git-dir)/objects/info/alternates"
+    cd "$TEST_DIR/proj/main"
+    # Precondition: B really borrows from A's store.
+    grep -q "worktrees/a/modules/sub/objects" "$B_ALT"
+}
+
+@test "cancel refuses when another tree's submodule alternates point into it" {
+    make_borrowing_trees
+
+    run git-wt cancel feature/a
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$B_ALT"* ]]
+    [[ "$output" == *"--repoint-alternates"* ]]
+    # Nothing was removed, and B still works.
+    [ -d "$A_WT" ]
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+}
+
+@test "finish refuses when another tree's submodule alternates point into it" {
+    make_borrowing_trees
+
+    run git-wt finish -P --keep-branch -F feature/a
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$B_ALT"* ]]
+    [ -d "$A_WT" ]
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+}
+
+@test "cancel --repoint-alternates repoints to the primary store and B still works" {
+    make_borrowing_trees
+
+    run git-wt cancel --repoint-alternates feature/a
+    [ "$status" -eq 0 ]
+    [ ! -d "$A_WT" ]
+    ! grep -q "worktrees/a/" "$B_ALT"
+    grep -q "/modules/sub/objects" "$B_ALT"
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+    git -C "$B_WT/sub" cat-file -e 'HEAD^{commit}'
+}
+
+@test "cancel without alternates into the tree removes it as before" {
+    make_borrowing_trees
+    # B borrows from A, not from B: removing B is safe.
+    run git-wt cancel feature/b
+    [ "$status" -eq 0 ]
+    [ ! -d "$B_WT" ]
+    git -C "$A_WT/sub" fsck --connectivity-only --no-dangling
+}
+
+@test "repoint is refused and undone when B needs objects only A's store has" {
+    make_borrowing_trees
+    # A new commit exists only in A's sub store; B refers to it by a branch.
+    git -C "$A_WT/sub" commit -q --allow-empty -m only-in-a
+    git -C "$B_WT/sub" fetch -q "$A_WT/sub" HEAD
+    git -C "$B_WT/sub" branch borrowed FETCH_HEAD
+    before="$(cat "$B_ALT")"
+
+    run git-wt cancel --repoint-alternates feature/a
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"missing objects"* ]]
+    [ -d "$A_WT" ]
+    [ "$(cat "$B_ALT")" = "$before" ]
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+}
