@@ -255,11 +255,13 @@ The lending store is in `<common git dir>/worktrees/<name>/modules/`.
 `git worktree remove` deletes that directory, and the borrowing submodule then fails with
 `unable to normalize alternate object path`.
 
-Before `finish` and `cancel` remove a worktree, they read every `objects/info/alternates` file under the common git dir.
+Before `finish`, `cancel` and `prune` remove a worktree, they read every `objects/info/alternates` file under the common git dir.
 If a line in another worktree's file points into the worktree that you remove, they stop before any push or remove.
 They name each file and its target.
+The check also works when the worktree folder is gone: git-wt finds the worktree's git dir from the `gitdir` files under `<common git dir>/worktrees/`.
 
-To continue, add `--repoint-alternates`. For each named file, git-wt then:
+To continue, add `--repoint-alternates`. The repoint runs right before the remove, after any prompt and push.
+For each named file, git-wt then:
 1. Replaces the line with the same path under the common git dir (the primary store).
 2. Runs `git fsck --connectivity-only` on the borrowing store.
 3. If a check fails, restores every changed file and removes nothing.
@@ -267,7 +269,7 @@ To continue, add `--repoint-alternates`. For each named file, git-wt then:
 A check fails when the borrowing store needs objects that only the lending store has.
 In that case, make the borrower self-contained first (`git repack -a -d` in it), then remove the alternates line.
 
-Not covered: `git-wt prune` (`git worktree prune`) deletes the git dir of a worktree whose directory is gone, with no check.
+Not covered: plain `git worktree remove` and `git worktree prune`, run without git-wt.
 Submodule git dirs inside a working tree (not absorbed into the common git dir) are not read.
 
 ---
@@ -327,6 +329,9 @@ git-wt prune
 **Alias:** `p`
 
 Use this if you manually deleted a worktree directory.
+
+**Options:**
+- `--repoint-alternates` - Same as for `finish`. Without it, prune refuses if a stale worktree lends submodule objects to another worktree.
 
 ---
 

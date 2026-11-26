@@ -249,10 +249,78 @@ make_borrowing_trees() {
     git -C "$B_WT/sub" branch borrowed FETCH_HEAD
     before="$(cat "$B_ALT")"
 
-    run git-wt cancel --repoint-alternates feature/a
+    # A's sub moved, so cancel asks about uncommitted changes first: say yes.
+    run git-wt cancel --repoint-alternates feature/a <<< "y"
     [ "$status" -ne 0 ]
     [[ "$output" == *"missing objects"* ]]
     [ -d "$A_WT" ]
     [ "$(cat "$B_ALT")" = "$before" ]
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+}
+
+# --- Review F1/F2 (67211a0) and prune ------------------------------------
+
+@test "cancel of a tree whose folder is gone still names the borrower" {
+    make_borrowing_trees
+    rm -rf "$A_WT"
+
+    run git-wt cancel feature/a < /dev/null
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$B_ALT"* ]]
+    [[ "$output" != *"Could not check"* ]]
+    [ -d "$TEST_DIR/proj/main/.git/worktrees/a/modules/sub" ]
+}
+
+@test "cancel --repoint-alternates of a tree whose folder is gone repoints and removes" {
+    make_borrowing_trees
+    rm -rf "$A_WT"
+
+    # A missing folder reads as uncommitted changes, so cancel asks: say yes.
+    run git-wt cancel --repoint-alternates feature/a <<< "y"
+    [ "$status" -eq 0 ]
+    [ ! -d "$TEST_DIR/proj/main/.git/worktrees/a" ]
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+}
+
+@test "prune refuses when a prunable tree lends objects to another tree" {
+    make_borrowing_trees
+    rm -rf "$A_WT"
+
+    run git-wt prune
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$B_ALT"* ]]
+    [ -d "$TEST_DIR/proj/main/.git/worktrees/a/modules/sub" ]
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+}
+
+@test "prune --repoint-alternates repoints, prunes, and B still works" {
+    make_borrowing_trees
+    rm -rf "$A_WT"
+
+    run git-wt prune --repoint-alternates
+    [ "$status" -eq 0 ]
+    [ ! -d "$TEST_DIR/proj/main/.git/worktrees/a" ]
+    git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
+}
+
+@test "declining cancel's prompt leaves the alternates file unchanged" {
+    make_borrowing_trees
+    echo dirty > "$A_WT/file.txt"
+    before="$(cat "$B_ALT")"
+
+    run git-wt cancel --repoint-alternates feature/a <<< "n"
+    [ "$status" -ne 0 ]
+    [ -d "$A_WT" ]
+    [ "$(cat "$B_ALT")" = "$before" ]
+}
+
+@test "start on a branch whose tree folder is gone does not prune a lender" {
+    make_borrowing_trees
+    rm -rf "$A_WT"
+
+    run git-wt start -C feature/a
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$B_ALT"* ]]
+    [ -d "$TEST_DIR/proj/main/.git/worktrees/a/modules/sub" ]
     git -C "$B_WT/sub" fsck --connectivity-only --no-dangling
 }

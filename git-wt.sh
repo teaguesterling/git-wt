@@ -535,7 +535,8 @@ _git_wt_start() {
         # No live worktree — recover the orphaned branch
         if [ -n "$stale_wt_path" ]; then
             echo "Pruning stale worktree entry for '$branch_name'..."
-            git -C "$main_path" worktree prune
+            # Guarded: prune deletes every stale gitdir, lender stores included
+            _git_wt_prune || return 1
         fi
 
         branch_exists=true
@@ -730,28 +731,58 @@ _git_wt_back() {
     echo -e "Switched to main worktree: ${GIT_WT_COLOR_PATH}$main_path${GIT_WT_COLOR_RESET}"
 }
 
+# The common git dir of the repo, absolute and resolved. Avoids
+# `rev-parse --path-format` (git 2.31+): --git-common-dir may be relative
+# to the directory git ran in.
+_git_wt_common_dir() {
+    local main_path="$1" common
+    common=$(git -C "$main_path" rev-parse --git-common-dir) || return 1
+    [[ "$common" == /* ]] || common="$main_path/$common"
+    realpath -- "$common"
+}
+
+# The gitdir (<common>/worktrees/<name>) of a worktree, resolved. Works when
+# the worktree folder is gone: it reads each gitdir's back-pointer file
+# instead of asking git inside the folder.
+_git_wt_worktree_gitdir() {
+    local main_path="$1" worktree_path="$2"
+    local common wt d back
+    common=$(_git_wt_common_dir "$main_path") || return 1
+    wt=$(realpath -m -- "$worktree_path") || return 1
+    for d in "$common"/worktrees/*/; do
+        [ -f "${d}gitdir" ] || continue
+        back=$(<"${d}gitdir")
+        back=$(realpath -m -- "${back%/.git}") || continue
+        if [ "$back" = "$wt" ]; then
+            realpath -- "${d%/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Find alternates entries in OTHER worktrees that point into a worktree.
 #
 # A submodule store in one worktree can borrow objects from a store in
 # another worktree (objects/info/alternates, e.g. after
 # `git submodule update --reference`). The lender store lives under
-# <common>/worktrees/<name>/modules/, which `git worktree remove` deletes.
+# <common>/worktrees/<name>/modules/, which `git worktree remove` and
+# `git worktree prune` delete.
 # Prints "<alternates file>\t<resolved target>" for each entry whose target
 # is inside the worktree's gitdir or its working tree. Paths are compared
 # after realpath, with a trailing "/" so tree "a" never matches "a-b".
+# Returns 1 (fail closed) if a path cannot be resolved.
 _git_wt_alternates_into() {
     local main_path="$1"
     local worktree_path="$2"
     local common gitdir wt
-    common=$(git -C "$main_path" rev-parse --path-format=absolute --git-common-dir) || return 1
-    common=$(realpath -- "$common") || return 1
-    gitdir=$(git -C "$worktree_path" rev-parse --absolute-git-dir) || return 1
-    gitdir=$(realpath -- "$gitdir") || return 1
-    wt=$(realpath -- "$worktree_path") || return 1
+    common=$(_git_wt_common_dir "$main_path") || return 1
+    gitdir=$(_git_wt_worktree_gitdir "$main_path" "$worktree_path") || return 1
+    wt=$(realpath -m -- "$worktree_path") || return 1
 
     local f f_real objdir line target
     while IFS= read -r -d '' f; do
-        f_real=$(realpath -- "$f") || continue
+        f_real=$(realpath -- "$f") || return 1
         # The worktree's own stores go away with it; they are not borrowers.
         case "$f_real/" in "$gitdir"/*|"$wt"/*) continue ;; esac
         objdir="${f_real%/info/alternates}"
@@ -762,7 +793,7 @@ _git_wt_alternates_into() {
             else
                 target="$objdir/$line"   # relative entries are relative to objects/
             fi
-            target=$(realpath -m -- "$target")
+            target=$(realpath -m -- "$target") || return 1
             case "$target/" in
                 "$gitdir"/*|"$wt"/*) printf '%s\t%s\n' "$f_real" "$target" ;;
             esac
@@ -779,14 +810,17 @@ _git_wt_repoint_alternates() {
     local main_path="$1"
     local worktree_path="$2"
     local records="$3"
-    local common gitdir
-    common=$(realpath -- "$(git -C "$main_path" rev-parse --path-format=absolute --git-common-dir)") || return 1
-    gitdir=$(realpath -- "$(git -C "$worktree_path" rev-parse --absolute-git-dir)") || return 1
+    local common gitdir wt
+    common=$(_git_wt_common_dir "$main_path") || return 1
+    gitdir=$(_git_wt_worktree_gitdir "$main_path" "$worktree_path") || return 1
+    wt=$(realpath -m -- "$worktree_path") || return 1
 
     local -a files=() backups=()
+    local -A seen=()
     local f target line new tmp backup failed=""
     while IFS=$'\t' read -r f target; do
-        [[ " ${files[*]} " == *" $f "* ]] && continue
+        [ -n "${seen[$f]:-}" ] && continue
+        seen[$f]=1
         backup=$(mktemp) || return 1
         cp -p -- "$f" "$backup"
         files+=("$f"); backups+=("$backup")
@@ -794,7 +828,7 @@ _git_wt_repoint_alternates() {
         while IFS= read -r line || [ -n "$line" ]; do
             if [[ -n "$line" && "$line" != \#* ]]; then
                 if [[ "$line" == /* ]]; then target="$line"; else target="${f%/info/alternates}/$line"; fi
-                target=$(realpath -m -- "$target")
+                target=$(realpath -m -- "$target") || { failed="$f"; break; }
                 case "$target/" in
                     "$gitdir"/*)
                         new="$common/${target#"$gitdir"/}"
@@ -804,7 +838,7 @@ _git_wt_repoint_alternates() {
                         fi
                         line="$new"
                         ;;
-                    "$(realpath -- "$worktree_path")"/*)
+                    "$wt"/*)
                         echo -e "${GIT_WT_COLOR_ERROR}Error: $f points into the working tree, not its git dir; cannot repoint${GIT_WT_COLOR_RESET}" >&2
                         failed="$f"
                         ;;
@@ -833,19 +867,25 @@ _git_wt_repoint_alternates() {
 }
 
 # Refuse to remove a worktree that other worktrees' submodules borrow
-# objects from, unless repoint is "true". Returns 1 to refuse.
+# objects from. Returns 1 to refuse. With mode "repoint", repoint them to
+# the primary store instead. With mode "defer", return 0 and leave the
+# repoint to a later call right before the remove, so an abort in between
+# (a declined prompt, a failed push) changes nothing.
 _git_wt_guard_alternates() {
     local main_path="$1"
     local worktree_path="$2"
-    local repoint="$3"
+    local mode="$3"
+    [ "$mode" = defer ] && return 0
     local records
     records=$(_git_wt_alternates_into "$main_path" "$worktree_path") || {
         echo -e "${GIT_WT_COLOR_ERROR}Error: Could not check submodule alternates for $worktree_path${GIT_WT_COLOR_RESET}" >&2
+        echo "No gitdir under <common>/worktrees/ points at it, or a path did not resolve." >&2
+        echo "Check with: git -C \"$main_path\" worktree list --porcelain" >&2
         return 1
     }
     [ -z "$records" ] && return 0
 
-    if [ "$repoint" = true ]; then
+    if [ "$mode" = repoint ]; then
         _git_wt_repoint_alternates "$main_path" "$worktree_path" "$records"
         return
     fi
@@ -963,8 +1003,13 @@ _git_wt_finish() {
         fi
     fi
 
-    # Refuse before any push or remove if other trees borrow objects from it
-    _git_wt_guard_alternates "$main_path" "$worktree_path" "$repoint" || return 1
+    # Refuse before any push or remove if other trees borrow objects from it.
+    # With --repoint-alternates, the repoint waits until right before the remove.
+    local alt_mode=refuse
+    [ "$repoint" = true ] && alt_mode=repoint
+    if [ "$alt_mode" = refuse ]; then
+        _git_wt_guard_alternates "$main_path" "$worktree_path" refuse || return 1
+    fi
 
     # Push branch unless --no-push
     if [ "$no_push" = false ]; then
@@ -1002,6 +1047,9 @@ _git_wt_finish() {
 
     # Remove worktree (--force needed when shared paths create symlinks that
     # replace submodules, since git sees type changes and refuses otherwise)
+    # Check again (or repoint) right before the remove
+    _git_wt_guard_alternates "$main_path" "$worktree_path" "$alt_mode" || return 1
+
     echo -e "Removing worktree ${GIT_WT_COLOR_PATH}$worktree_path${GIT_WT_COLOR_RESET}..."
     local shared_paths=$(_git_wt_get_shared_paths)
     if [ "$force" = true ] || [ -n "$shared_paths" ]; then
@@ -1110,8 +1158,13 @@ _git_wt_cancel() {
         return 1
     fi
 
-    # Refuse if other trees borrow submodule objects from this one
-    _git_wt_guard_alternates "$main_path" "$worktree_path" "$repoint" || return 1
+    # Refuse if other trees borrow submodule objects from this one.
+    # With --repoint-alternates, the repoint waits until after the prompt.
+    local alt_mode=refuse
+    [ "$repoint" = true ] && alt_mode=repoint
+    if [ "$alt_mode" = refuse ]; then
+        _git_wt_guard_alternates "$main_path" "$worktree_path" refuse || return 1
+    fi
 
     # Warn about uncommitted changes (excluding shared/symlinked paths)
     if _git_wt_has_uncommitted_changes "$worktree_path"; then
@@ -1126,6 +1179,9 @@ _git_wt_cancel() {
 
     # Move to main before removing
     cd "$main_path"
+
+    # Check again (or repoint) right before the remove
+    _git_wt_guard_alternates "$main_path" "$worktree_path" "$alt_mode" || return 1
 
     # Remove worktree
     echo -e "Removing worktree ${GIT_WT_COLOR_PATH}$worktree_path${GIT_WT_COLOR_RESET}..."
@@ -1214,9 +1270,38 @@ _git_wt_status() {
 
 # Prune deleted worktrees
 _git_wt_prune() {
+    local alt_mode=refuse
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repoint-alternates)
+                alt_mode=repoint
+                shift
+                ;;
+            *)
+                echo -e "${GIT_WT_COLOR_ERROR}Error: Unknown option '$1'${GIT_WT_COLOR_RESET}" >&2
+                return 1
+                ;;
+        esac
+    done
+
     _git_wt_check_repo || return 1
 
     local main_path=$(_git_wt_main_path)
+
+    # Prune deletes the gitdir of each prunable worktree, with any submodule
+    # stores in it. Check each one first, as finish and cancel do.
+    local line wt_path=""
+    local -a prunable=()
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*) wt_path="${line#worktree }" ;;
+            prunable*) prunable+=("$wt_path") ;;
+        esac
+    done < <(git -C "$main_path" worktree list --porcelain 2>/dev/null)
+    local p
+    for p in "${prunable[@]}"; do
+        _git_wt_guard_alternates "$main_path" "$p" "$alt_mode" || return 1
+    done
 
     echo "Pruning deleted worktrees..."
     git -C "$main_path" worktree prune -v
@@ -1298,7 +1383,8 @@ COMMANDS:
 
   status|st                      Show current worktree info
 
-  prune|p                        Clean up deleted worktrees
+  prune|p [options]              Clean up deleted worktrees
+    --repoint-alternates         Same as for finish
 
   sync                           Fetch and pull in main worktree
 
