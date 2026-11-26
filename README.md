@@ -203,6 +203,7 @@ Finish a worktree with smart cleanup.
 - `--keep-branch` - Don't delete branch
 - `-P, --no-push` - Don't push to remote
 - `--rm` - Force delete branch
+- `--repoint-alternates` - Repoint submodule alternates that borrow from this worktree (see below)
 
 ```bash
 git-wt finish                          # Smart cleanup
@@ -216,6 +217,7 @@ git-wt finish --rm                     # Force delete branch
 
 **Safety features:**
 - Checks for uncommitted changes
+- Refuses if another worktree's submodule borrows objects from this one (see below)
 - Warns before force operations
 - Only deletes branches that are merged or explicitly requested
 
@@ -227,6 +229,7 @@ Remove a worktree without the smart cleanup of finish.
 
 **Options:**
 - `--delete-branch` - Also delete the branch (with confirmation)
+- `--repoint-alternates` - Same as for `finish`
 
 ```bash
 git-wt cancel                          # Remove current worktree
@@ -238,8 +241,36 @@ git-wt cancel --delete-branch          # Remove worktree and branch
 
 **Safety features:**
 - Warns about uncommitted changes
+- Refuses if another worktree's submodule borrows objects from this one (see below)
 - Confirms before deleting unmerged branches
 - Keeps branch by default
+
+### Submodule alternates guard
+
+The rule: before you remove a worktree, make sure that no other worktree borrows objects from it.
+
+A submodule store in one worktree can borrow objects from the submodule store of another worktree.
+The link is a line in `objects/info/alternates`, for example after `git submodule update --reference <other tree>`.
+The lending store is in `<common git dir>/worktrees/<name>/modules/`.
+`git worktree remove` deletes that directory, and the borrowing submodule then fails with
+`unable to normalize alternate object path`.
+
+Before `finish`, `cancel` and `prune` remove a worktree, they read every `objects/info/alternates` file under the common git dir.
+If a line in another worktree's file points into the worktree that you remove, they stop before any push or remove.
+They name each file and its target.
+The check also works when the worktree folder is gone: git-wt finds the worktree's git dir from the `gitdir` files under `<common git dir>/worktrees/`.
+
+To continue, add `--repoint-alternates`. The repoint runs right before the remove, after any prompt and push.
+For each named file, git-wt then:
+1. Replaces the line with the same path under the common git dir (the primary store).
+2. Runs `git fsck --connectivity-only` on the borrowing store.
+3. If a check fails, restores every changed file and removes nothing.
+
+A check fails when the borrowing store needs objects that only the lending store has.
+In that case, make the borrower self-contained first (`git repack -a -d` in it), then remove the alternates line.
+
+Not covered: plain `git worktree remove` and `git worktree prune`, run without git-wt.
+Submodule git dirs inside a working tree (not absorbed into the common git dir) are not read.
 
 ---
 
@@ -298,6 +329,9 @@ git-wt prune
 **Alias:** `p`
 
 Use this if you manually deleted a worktree directory.
+
+**Options:**
+- `--repoint-alternates` - Same as for `finish`. Without it, prune refuses if a stale worktree lends submodule objects to another worktree.
 
 ---
 
